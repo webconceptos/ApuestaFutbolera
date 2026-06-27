@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: pollaapp-db-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pollaapp
+      POSTGRES_PASSWORD: pollaapp
+      POSTGRES_DB: pollaapp
+    ports:
+      - "5432:5432"
+    volumes:
+      - pollaapp_db_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pollaapp -d pollaapp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: pollaapp-redis-dev
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - pollaapp_redis_dev_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pollaapp_db_dev_data:
+  pollaapp_redis_dev_data:

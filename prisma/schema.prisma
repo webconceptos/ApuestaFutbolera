@@ -1,0 +1,413 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── USUARIOS ────────────────────────────────────────────────────────────────
+
+model User {
+  id              String      @id @default(cuid())
+  // Identidad
+  email           String      @unique
+  name            String
+  username        String?     @unique // opcional, para menciones @usuario
+  password        String?               // null si usa OAuth
+  passwordChangedAt DateTime?           // invalida sesiones JWT emitidas antes de este momento
+  avatarUrl       String?               // URL tras subir imagen
+  phone           String?               // opcional, para contacto
+  bio             String?               // descripción corta en perfil público
+  // Acceso y verificación
+  role            GlobalRole  @default(USER)
+  isVerified      Boolean     @default(false)
+  isActive        Boolean     @default(true) // false = cuenta suspendida
+  verifyToken     String?
+  verifyTokenExp  DateTime?
+  resetToken      String?
+  resetTokenExp   DateTime?
+  pendingEmail    String?               // nuevo email a confirmar (cambio de email desde /profile/security)
+  deleteToken     String?               // confirmación de eliminación de cuenta (/profile/danger)
+  deleteTokenExp  DateTime?
+  // Preferencias de notificaciones (JSON configurable desde el perfil)
+  notifPrefs      Json        @default("{\"email\":{\"resultScored\":true,\"rankChange\":true,\"deadlineWarning\":true,\"paymentConfirmed\":true},\"inApp\":{\"resultScored\":true,\"rankChange\":true,\"deadlineWarning\":true}}")
+  // Auditoría
+  lastLoginAt     DateTime?
+  lastLoginIp     String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  // Creado por (si un superadmin creó la cuenta manualmente)
+  createdById     String?
+  internalNote    String?     @db.Text // solo visible/editable por SUPERADMIN
+
+  poolMemberships    PoolMember[]
+  predictions        Prediction[]
+  ownedPools         Pool[]              @relation("PoolOwner")
+  notifications      Notification[]
+  activityLogs       UserActivityLog[]
+  managedTournaments TournamentManager[]
+  accounts           Account[]
+  sessions           Session[]
+  createdByUser       User?              @relation("CreatedBy", fields: [createdById], references: [id])
+  createdUsers       User[]              @relation("CreatedBy")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ─── GESTIÓN DE ACCESO A TORNEOS ─────────────────────────────────────────────
+
+model TournamentManager {
+  // Qué torneos puede administrar un GlobalRole.TOURNAMENT_MANAGER
+  id               String     @id @default(cuid())
+  userId           String
+  tournamentId     String
+  assignedById     String // superadmin que lo asignó
+  assignedAt       DateTime   @default(now())
+  canEditMatches   Boolean    @default(true) // puede editar partidos
+  canEnterResults  Boolean    @default(true) // puede ingresar resultados
+  canCreateMatches Boolean    @default(false) // puede crear partidos (más permisivo)
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tournament Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tournamentId])
+  @@index([tournamentId])
+}
+
+// ─── AUDITORÍA ────────────────────────────────────────────────────────────────
+
+model UserActivityLog {
+  id         String         @id @default(cuid())
+  userId     String
+  action     ActivityAction
+  entityType String? // "Pool", "Match", "Prediction", "User"...
+  entityId   String? // ID del objeto afectado
+  metadata   Json? // detalles extra (valores anteriores/nuevos)
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime       @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+model Tournament {
+  id          String   @id @default(cuid())
+  name        String // "FIFA World Cup 2026"
+  shortName   String // "Mundial 2026"
+  logo        String? // URL del logo
+  sport       String   @default("football") // "football", "basketball"...
+  country     String? // país/región
+  season      String // "2026", "2025-26"
+  startDate   DateTime
+  endDate     DateTime
+  isActive    Boolean  @default(true)
+  isPublic    Boolean  @default(true) // aparece en la landing
+  description String?  @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  matches  Match[]
+  pools    Pool[]
+  managers TournamentManager[]
+}
+
+// ─── PARTIDOS ────────────────────────────────────────────────────────────────
+
+model Match {
+  id           String      @id @default(cuid())
+  tournamentId String
+  matchNumber  Int
+  phase        String // "Group A", "Round of 16", "Final"...
+  round        Int? // Jornada (útil en ligas)
+  homeTeam     String
+  awayTeam     String
+  homeFlag     String // emoji 🇵🇪 o URL
+  awayFlag     String
+  matchDate    DateTime
+  venue        String?
+  city         String?
+  homeScore    Int? // null = no jugado
+  awayScore    Int?
+  status       MatchStatus @default(UPCOMING)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  tournament  Tournament   @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  predictions Prediction[]
+
+  @@unique([tournamentId, matchNumber])
+  @@index([tournamentId, matchDate])
+  @@index([tournamentId, status])
+}
+
+// ─── POLLAS ───────────────────────────────────────────────────────────────────
+
+model Pool {
+  id           String   @id @default(cuid())
+  tournamentId String
+  ownerId      String // User que la creó
+  name         String // "La Oficina CGR"
+  slug         String   @unique // URL pública: /p/la-oficina-cgr
+  description  String?
+  logo         String?
+  isPublic     Boolean  @default(false) // aparece en lista pública del torneo
+  inviteCode   String   @unique // código para unirse
+  inviteOnly   Boolean  @default(true) // false = cualquiera puede unirse
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tournament  Tournament    @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  owner       User          @relation("PoolOwner", fields: [ownerId], references: [id])
+  members     PoolMember[]
+  predictions Prediction[]
+  config      PoolConfig?
+}
+
+model PoolConfig {
+  id     String @id @default(cuid())
+  poolId String @unique
+  // Plazos
+  predictionDeadlineHours Int @default(1)
+  // Puntuación
+  pointsExactScore      Int     @default(5)
+  pointsCorrectResult   Int     @default(2)
+  pointsCorrectGoalDiff Int     @default(3)
+  bonusKnockout         Float   @default(1.5)
+  bonusFinal            Float   @default(2.0)
+  // Desempate (CSV ordenado de criterios)
+  tiebreakerCriteria    String  @default("exactScores,goalDiff,alphabetical")
+  // Si está seteado, las predicciones de partidos con matchDate anterior a
+  // esta fecha no suman al ranking de la polla (igual quedan guardadas y con
+  // sus puntos calculados en la predicción individual) — para pollas que se
+  // crean a mitad de torneo y quieren que todos arranquen parejos desde una
+  // fecha en común, sin que cuenten apuestas hechas antes de esa fecha.
+  scoringStartDate      DateTime?
+  // Fecha de cierre del rango de puntuación — partidos con matchDate posterior
+  // a esta fecha tampoco suman al ranking. Útil para pollas de semana específica.
+  scoringEndDate        DateTime?
+  // Cuota
+  entryFeeEnabled       Boolean @default(false)
+  entryFeeAmount        Float   @default(0)
+  entryFeeCurrency      String  @default("PEN")
+  entryFeeInstructions  String? @db.Text
+  prizeDescription      String? @db.Text
+  // Visibilidad pública
+  publicPanelEnabled    Boolean @default(true) // activa /p/[slug]
+  publicShowRanking     Boolean @default(true)
+  publicShowPredictions Boolean @default(false) // apuestas visibles en panel público
+  publicShowFixture     Boolean @default(true)
+  // Visibilidad entre miembros
+  showOthersPredictions PredictionRevealMode @default(AFTER_MATCH)
+  // Participantes
+  maxMembers       Int     @default(50)
+  registrationOpen Boolean @default(true)
+  // Contenido
+  welcomeMessage String? @db.Text
+  rules          String? @db.Text // Markdown
+  accentColor    String  @default("#F59E0B")
+  updatedAt      DateTime @updatedAt
+
+  pool Pool @relation(fields: [poolId], references: [id], onDelete: Cascade)
+}
+
+// ─── PARTICIPANTES ────────────────────────────────────────────────────────────
+
+model PoolMember {
+  id          String   @id @default(cuid())
+  poolId      String
+  userId      String
+  role        PoolRole @default(PLAYER) // OWNER puede editar config
+  hasPaid     Boolean  @default(false)
+  paymentNote String? // referencia de pago (llena el owner)
+  invitedBy   String? // userId de quien invitó
+  // Cache de estadísticas (se recalcula al ingresar resultados)
+  totalPoints  Int      @default(0)
+  exactScores  Int      @default(0)
+  rankPosition Int?
+  previousRankPosition Int? // snapshot antes del último recálculo, para la flecha de tendencia del panel público
+  isActive     Boolean  @default(true) // false = expulsado/abandonó
+  joinedAt     DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  pool Pool @relation(fields: [poolId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([poolId, userId])
+  @@index([poolId, totalPoints]) // Para calcular ranking rápido
+}
+
+// ─── PREDICCIONES ─────────────────────────────────────────────────────────────
+
+model Prediction {
+  id           String     @id @default(cuid())
+  poolId       String // A qué polla pertenece
+  userId       String
+  matchId      String
+  homeScore    Int // Apuesta: goles local
+  awayScore    Int // Apuesta: goles visita
+  pointsEarned Int        @default(0)
+  resultType   ResultType @default(NONE)
+  isScored     Boolean    @default(false)
+  submittedAt  DateTime   @default(now())
+  editedAt     DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  pool  Pool  @relation(fields: [poolId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  match Match @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@unique([poolId, userId, matchId]) // Una apuesta por usuario por partido por polla
+  @@index([poolId, matchId])
+  @@index([poolId, userId])
+  @@index([matchId]) // Para scoring batch cuando se ingresa resultado
+}
+
+// ─── NOTIFICACIONES ───────────────────────────────────────────────────────────
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  poolId    String? // null = notificación global
+  type      NotificationType
+  title     String
+  message   String
+  isRead    Boolean          @default(false)
+  metadata  Json? // { matchId, pointsEarned, poolName }
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+}
+
+// ─── BOOTSTRAP DE LA APLICACIÓN ───────────────────────────────────────────────
+
+model AppSetup {
+  id          String   @id @default("singleton")
+  appName     String   @default("Apuesta Futbolera FGA")
+  completedAt DateTime
+  setupById   String // userId del primer superadmin
+}
+
+// ─── ENUMS ────────────────────────────────────────────────────────────────────
+
+enum GlobalRole {
+  USER // Usuario estándar
+  TOURNAMENT_MANAGER // Administra torneos asignados (sin acceso a usuarios ni pollas ajenas)
+  SUPERADMIN // Acceso total al sistema
+}
+
+enum PoolRole {
+  PLAYER // Participa y apuesta en la polla
+  MODERATOR // Co-admin: confirma pagos, gestiona miembros; NO edita PoolConfig
+  OWNER // Control total: config, miembros, cuota, notificaciones
+}
+
+enum MatchStatus {
+  UPCOMING
+  LIVE
+  FINISHED
+  CANCELLED
+}
+
+enum ResultType {
+  NONE
+  CORRECT_RESULT // 2 pts: acertó ganador o empate
+  CORRECT_DIFF // 3 pts: diferencia de goles correcta
+  EXACT_SCORE // 5 pts: marcador exacto
+}
+
+enum PredictionRevealMode {
+  NEVER
+  AFTER_MATCH // Cuando pasa matchDate
+  AFTER_SCORED // Cuando superadmin/manager ingresa el resultado
+  ALWAYS
+}
+
+enum NotificationType {
+  RESULT_SCORED
+  RANK_UP
+  RANK_DOWN
+  DEADLINE_WARNING
+  PAYMENT_CONFIRMED
+  WELCOME
+  POOL_INVITE
+  ACCOUNT_CREATED // Superadmin creó la cuenta manualmente
+  ROLE_CHANGED // Tu rol global fue actualizado
+  CUSTOM
+}
+
+enum ActivityAction {
+  // Auth
+  LOGIN
+  LOGOUT
+  REGISTER
+  PASSWORD_CHANGED
+  EMAIL_CHANGED
+  PROFILE_UPDATED
+  AVATAR_UPDATED
+  // Usuarios (superadmin)
+  USER_CREATED
+  USER_UPDATED
+  USER_SUSPENDED
+  USER_REACTIVATED
+  USER_ROLE_CHANGED
+  USER_PASSWORD_RESET
+  IMPERSONATION_STARTED
+  IMPERSONATION_ENDED
+  // Torneos
+  TOURNAMENT_CREATED
+  TOURNAMENT_UPDATED
+  TOURNAMENT_DELETED
+  MANAGER_ASSIGNED
+  MANAGER_REVOKED
+  // Partidos
+  MATCH_CREATED
+  MATCH_UPDATED
+  RESULT_ENTERED
+  // Pollas
+  POOL_CREATED
+  POOL_UPDATED
+  POOL_DELETED
+  POOL_JOINED
+  POOL_LEFT
+  MEMBER_ADDED
+  MEMBER_REMOVED
+  MEMBER_ROLE_CHANGED
+  PAYMENT_CONFIRMED
+  // Predicciones
+  PREDICTION_CREATED
+  PREDICTION_UPDATED
+}

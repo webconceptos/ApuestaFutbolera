@@ -1,0 +1,117 @@
+# Producción. Solo nginx queda expuesto al exterior (CLAUDE.md, sección
+# Seguridad); app/db/redis/backup viven en la red interna pollaapp-network.
+#
+# Usa .env.production (separado del .env de desarrollo local) para no pisar
+# la config de `npm run dev`. --env-file es necesario además de env_file:
+# porque compose solo lee ${VARS} de este archivo para interpolar el propio
+# YAML (ej. ${POSTGRES_PASSWORD} de abajo) si se lo indicás explícitamente.
+#
+# Uso:
+#   docker compose --env-file .env.production up -d --build
+#   docker compose exec app npx prisma migrate deploy
+#   docker compose logs -f app
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pollaapp-app
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - pollaapp-network
+    healthcheck:
+      # 127.0.0.1 explícito: "localhost" resuelve primero a ::1 en este
+      # entorno y el server de Next solo escucha en IPv4, así que wget
+      # fallaba con "Connection refused" pese a que el endpoint sí respondía.
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  db:
+    image: postgres:16-alpine
+    container_name: pollaapp-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pollaapp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?se requiere POSTGRES_PASSWORD en .env}
+      POSTGRES_DB: ${POSTGRES_DB:-pollaapp}
+    volumes:
+      - pollaapp_db_data:/var/lib/postgresql/data
+    networks:
+      - pollaapp-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pollaapp} -d ${POSTGRES_DB:-pollaapp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: pollaapp-redis
+    restart: unless-stopped
+    volumes:
+      - pollaapp_redis_data:/data
+    networks:
+      - pollaapp-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  nginx:
+    image: nginx:alpine
+    container_name: pollaapp-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - certbot_webroot:/var/www/certbot:ro
+    depends_on:
+      - app
+    networks:
+      - pollaapp-network
+
+  backup:
+    image: postgres:16-alpine
+    container_name: pollaapp-backup
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pollaapp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?se requiere POSTGRES_PASSWORD en .env}
+      POSTGRES_DB: ${POSTGRES_DB:-pollaapp}
+      PGHOST: db
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup-db.sh:/backup-db.sh:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "echo '0 3 * * * /backup-db.sh >> /backups/cron.log 2>&1' | crontab - && crond -f -l 2"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - pollaapp-network
+
+networks:
+  pollaapp-network:
+    driver: bridge
+
+volumes:
+  pollaapp_db_data:
+  pollaapp_redis_data:
+  certbot_webroot:

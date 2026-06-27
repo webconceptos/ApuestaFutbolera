@@ -36,6 +36,19 @@ yarn-error.log*
 # vercel
 .vercel
 
+# avatares subidos por usuarios (no versionar)
+/public/avatars/*
+!/public/avatars/.gitkeep
+
+# backups de la base de datos (scripts/backup-db.sh)
+/backups/*
+!/backups/.gitkeep
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# SSL certificates and private keys — NUNCA subir al repositorio
+# Generarlos con Certbot: ver nginx/ssl/README.md
+nginx/ssl/*.pem
+nginx/ssl/letsencrypt/

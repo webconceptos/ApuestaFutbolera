@@ -1,0 +1,9 @@
+# Override local: el 443 de esta máquina ya está ocupado por otro servicio
+# (no es un puerto estándar disponible acá), así que nginx publica en
+# 8080/8443 en vez de 80/443. Docker Compose carga este archivo
+# automáticamente junto a docker-compose.yml si está en el mismo directorio.
+services:
+  nginx:
+    ports: !override
+      - "8080:80"
+      - "8443:443"
